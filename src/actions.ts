@@ -826,14 +826,57 @@ async function handleUncheck(command: UncheckCommand, browser: BrowserManager): 
 }
 
 async function handleUpload(command: UploadCommand, browser: BrowserManager): Promise<Response> {
-  const locator = browser.getLocator(command.selector);
   const files = Array.isArray(command.files) ? command.files : [command.files];
+
   try {
-    await locator.setInputFiles(files);
+    const page = browser.getPage();
+    const cdp = await browser.getCDPSession();
+
+    const absoluteFiles = files.map((file) => {
+      if (path.isAbsolute(file)) {
+        return file;
+      }
+      return path.resolve(process.cwd(), file);
+    });
+
+    let cssSelector = command.selector;
+    if (browser.isRef(command.selector)) {
+      const locator = browser.getLocator(command.selector);
+      const elementHandle = await locator.elementHandle();
+
+      if (!elementHandle) {
+        throw new Error(`Element not found: ${command.selector}`);
+      }
+
+      cssSelector = await elementHandle.evaluate((el) => {
+        if (el.id) return `#${el.id}`;
+        if (el.name) return `input[name="${el.name}"]`;
+        return 'input[type="file"]';
+      });
+    }
+
+    const { root } = await cdp.send('DOM.getDocument', { depth: 0 });
+    const { nodeId } = await cdp.send('DOM.querySelector', {
+      nodeId: root.nodeId,
+      selector: cssSelector,
+    });
+
+    if (!nodeId || nodeId === 0) {
+      throw new Error(`Element not found with selector: ${cssSelector}`);
+    }
+
+    await cdp.send('DOM.setFileInputFiles', {
+      files: absoluteFiles,
+      nodeId,
+    });
+
+    const locator = browser.getLocator(command.selector);
+    await locator.dispatchEvent('change');
+
+    return successResponse(command.id, { uploaded: absoluteFiles });
   } catch (error) {
     throw toAIFriendlyError(error, command.selector);
   }
-  return successResponse(command.id, { uploaded: files });
 }
 
 async function handleDoubleClick(
