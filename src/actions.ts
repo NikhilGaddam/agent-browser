@@ -839,30 +839,33 @@ async function handleUpload(command: UploadCommand, browser: BrowserManager): Pr
       return path.resolve(process.cwd(), file);
     });
 
-    let cssSelector = command.selector;
-    if (browser.isRef(command.selector)) {
-      const locator = browser.getLocator(command.selector);
-      const elementHandle = await locator.elementHandle();
+    const locator = browser.getLocator(command.selector);
+    let nodeId: number;
 
+    if (browser.isRef(command.selector)) {
+      const elementHandle = await locator.elementHandle();
       if (!elementHandle) {
         throw new Error(`Element not found: ${command.selector}`);
       }
 
-      cssSelector = await elementHandle.evaluate((el) => {
-        if (el.id) return `#${el.id}`;
-        if (el.name) return `input[name="${el.name}"]`;
-        return 'input[type="file"]';
+      const remoteObject = (elementHandle as any)._remoteObject;
+      if (!remoteObject?.objectId) {
+        throw new Error(`Could not get remote object for: ${command.selector}`);
+      }
+
+      const { node } = await cdp.send('DOM.describeNode', { objectId: remoteObject.objectId });
+      nodeId = node.nodeId;
+    } else {
+      const { root } = await cdp.send('DOM.getDocument', { depth: 0 });
+      const result = await cdp.send('DOM.querySelector', {
+        nodeId: root.nodeId,
+        selector: command.selector,
       });
+      nodeId = result.nodeId;
     }
 
-    const { root } = await cdp.send('DOM.getDocument', { depth: 0 });
-    const { nodeId } = await cdp.send('DOM.querySelector', {
-      nodeId: root.nodeId,
-      selector: cssSelector,
-    });
-
     if (!nodeId || nodeId === 0) {
-      throw new Error(`Element not found with selector: ${cssSelector}`);
+      throw new Error(`Element not found: ${command.selector}`);
     }
 
     await cdp.send('DOM.setFileInputFiles', {
@@ -870,7 +873,6 @@ async function handleUpload(command: UploadCommand, browser: BrowserManager): Pr
       nodeId,
     });
 
-    const locator = browser.getLocator(command.selector);
     await locator.dispatchEvent('change');
 
     return successResponse(command.id, { uploaded: absoluteFiles });
